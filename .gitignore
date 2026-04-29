@@ -1,0 +1,46 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Large model/library files
+*.so
+*.so.*
+*.weights.data
+*.weights.index
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# TensorFlow/ML artifacts
+*.pb
+*.h5
+*.ckpt
+*.ckpt.*
+*.tflite
+saved_model/
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Large model/library files
+*.so
+*.so.*
+*.weights.data
+*.weights.index
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# TensorFlow/ML artifacts
+*.pb
+*.h5
+*.ckpt
+*.ckpt.*
+*.tflite
+saved_model/
