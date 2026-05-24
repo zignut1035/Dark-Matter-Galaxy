@@ -26,12 +26,12 @@ class CouplingLayer(keras.layers.Layer):
         self.net_s = keras.Sequential([
             keras.layers.Dense(hidden, activation='tanh'),
             keras.layers.Dense(hidden, activation='tanh'),
-            keras.layers.Dense(2)
+            keras.layers.Dense(2, kernel_initializer='zeros', bias_initializer='zeros')
         ])
         self.net_t = keras.Sequential([
             keras.layers.Dense(hidden, activation='tanh'),
             keras.layers.Dense(hidden, activation='tanh'),
-            keras.layers.Dense(2)
+            keras.layers.Dense(2, kernel_initializer='zeros', bias_initializer='zeros')
         ])
 
     def call(self, x, reverse=False):
@@ -80,40 +80,30 @@ class NFlow(keras.Model):
         return self.log_prob(x)
 
 
-# ── 3. Training function (defined per-model inside the loop) ─────────────────
-# train_step is defined inside the main loop to avoid @tf.function graph
-# caching issues when multiple models are trained sequentially.
-
-
-# ── 4. Profile computation helpers ───────────────────────────────────────────
+# ── 3. Profile computation helpers ───────────────────────────────────────────
 def compute_profiles(samples, mean, std):
     """Denormalise samples, compute Σ(R), σ_los(R), n(r), σ_r²(r), M(r)."""
     s    = samples * std + mean
     X_s  = s[:, 0];  Y_s = s[:, 1];  VZ_s = s[:, 2]
     R_s  = np.sqrt(X_s**2 + Y_s**2)
 
-    # Clip extreme NF tails (central 98 %)
     lo, hi = np.percentile(R_s, 1), np.percentile(R_s, 99)
     mask = (R_s > lo) & (R_s < hi)
     R_s  = R_s[mask];  VZ_s = VZ_s[mask]
 
-    # Radial bins (log-spaced)
     R_bins = np.logspace(np.log10(R_s.min()*1.01),
                          np.log10(R_s.max()*0.99), 25)
     R_mid  = 0.5 * (R_bins[:-1] + R_bins[1:])
 
-    # Σ(R) – projected surface density
     counts, _ = np.histogram(R_s, bins=R_bins)
     area       = np.pi * (R_bins[1:]**2 - R_bins[:-1]**2)
     Sigma      = counts / area
 
-    # σ_los²(R)
     sigma_los2 = np.array([
         VZ_s[(R_s >= R_bins[k]) & (R_s < R_bins[k+1])].var()
         for k in range(len(R_bins) - 1)
     ])
 
-    # ── Abel inversion: Σ(R) → n(r) ──────────────────────────────────────────
     log_Sigma_spl = UnivariateSpline(np.log(R_mid), np.log(Sigma + 1e-30), s=1)
     dSigma_dR = lambda R: (
         np.exp(log_Sigma_spl(np.log(R))) / R
@@ -130,7 +120,6 @@ def compute_profiles(samples, mean, std):
     r_grid = np.logspace(np.log10(R_mid[3]), np.log10(R_mid[-2]), 30)
     n_r    = np.array([abel_density(r) for r in r_grid])
 
-    # ── Jeans inversion: σ_los + n(r) → σ_r²(r) ─────────────────────────────
     Sigma_slos2 = Sigma * sigma_los2
     log_SS_spl  = UnivariateSpline(np.log(R_mid), np.log(Sigma_slos2 + 1e-30), s=1)
     dSS_dR = lambda R: (
@@ -151,8 +140,8 @@ def compute_profiles(samples, mean, std):
     sigma_r2_b0  = np.array([jeans_sigma_r2(r, beta=0.0)  for r in r_grid])
     sigma_r2_bm5 = np.array([jeans_sigma_r2(r, beta=-0.5) for r in r_grid])
 
-    # ── Dark matter enclosed mass M(r) ────────────────────────────────────────
-    G = 4.30091e-6   # (km/s)² · kpc / M☉
+    # M(r) still computed and returned for use by the DM script
+    G = 4.30091e-6
     dln_n_dln_r       = n_spl.derivative()(np.log(r_grid))
     log_sig2_spl_b0   = UnivariateSpline(np.log(r_grid),
                                          np.log(sigma_r2_b0 + 1e-30), s=1)
@@ -162,7 +151,7 @@ def compute_profiles(samples, mean, std):
     return r_grid, n_r, sigma_r2_b0, sigma_r2_bm5, M_r_b0
 
 
-# ── 5. Ground-truth loader ────────────────────────────────────────────────────
+# ── 4. Ground-truth loader ────────────────────────────────────────────────────
 def load_ground_truth(input_filename):
     gt_filename = (input_filename
                    .replace('3D_data', '6D_data')
@@ -195,9 +184,9 @@ def load_ground_truth(input_filename):
     return gt_r_mid, n_true, sigma2_true
 
 
-# ── 6. Plotting function ──────────────────────────────────────────────────────
-def make_plot(base_name, r_grid, n_r, sigma_r2_b0, sigma_r2_bm5, M_r_b0, gt):
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+# ── 5. Plotting function — 2 panels only ─────────────────────────────────────
+def make_plot(base_name, r_grid, n_r, sigma_r2_b0, sigma_r2_bm5, gt):
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))   # ← 2 panels only
 
     if gt is not None:
         gt_r_mid, n_true, sigma2_true = gt
@@ -206,14 +195,14 @@ def make_plot(base_name, r_grid, n_r, sigma_r2_b0, sigma_r2_bm5, M_r_b0, gt):
         axes[1].semilogx(gt_r_mid, np.log(sigma2_true), 'k-', lw=2, alpha=0.7,
                          label='True 6D Physics')
 
-    # Density
+    # Panel 1 — Stellar number density
     axes[0].loglog(r_grid, n_r, 'g--', lw=2, label='Estimated, NFlow')
     axes[0].set_xlabel('r [kpc]')
     axes[0].set_ylabel('n(r) [kpc⁻³]')
     axes[0].set_title('Stellar number density')
     axes[0].legend(); axes[0].grid(True, alpha=0.3)
 
-    # Velocity dispersion
+    # Panel 2 — Velocity dispersion
     axes[1].semilogx(r_grid, np.log(sigma_r2_b0),  'g--', lw=2,
                      label=r'Estimated $\beta=0$')
     axes[1].semilogx(r_grid, np.log(sigma_r2_bm5), 'b:',  lw=2,
@@ -223,16 +212,8 @@ def make_plot(base_name, r_grid, n_r, sigma_r2_b0, sigma_r2_bm5, M_r_b0, gt):
     axes[1].set_title('Radial velocity dispersion')
     axes[1].legend(); axes[1].grid(True, alpha=0.3)
 
-    # Enclosed mass
-    axes[2].loglog(r_grid, M_r_b0, 'g--', lw=2,
-                   label=r'Estimated $M(r)$ ($\beta=0$)')
-    axes[2].set_xlabel('r [kpc]')
-    axes[2].set_ylabel(r'Mass M(r) [$M_\odot$]')
-    axes[2].set_title('Dark Matter Enclosed Mass')
-    axes[2].legend(); axes[2].grid(True, alpha=0.3)
-
     plt.suptitle(
-        f'DM mass profile from projected observables only\n({base_name})',
+        f'Stellar profiles from projected observables\n({base_name})',
         fontsize=11)
     plt.tight_layout()
     out_png = f'{base_name}_profiles.png'
@@ -242,7 +223,7 @@ def make_plot(base_name, r_grid, n_r, sigma_r2_b0, sigma_r2_bm5, M_r_b0, gt):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Main loop over all 6 data files
+# Main loop
 # ══════════════════════════════════════════════════════════════════════════════
 for input_filename in DATA_FILES:
     base_name = os.path.splitext(os.path.basename(input_filename))[0]
@@ -250,7 +231,6 @@ for input_filename in DATA_FILES:
     print(f"Processing: {input_filename}  ({base_name})")
     print(f"{'='*60}")
 
-    # ── Load & normalise ──────────────────────────────────────────────────────
     df = pd.read_csv(input_filename, sep=r'\s+', comment='#',
                      names=['X', 'Y', 'V_Z'])
     obs      = df[['X', 'Y', 'V_Z']].values.astype(np.float32)
@@ -259,9 +239,6 @@ for input_filename in DATA_FILES:
     obs_norm = (obs - mean_obs) / std_obs
 
     print(f"  Stars loaded: {len(obs)}")
-    print(f"  X range:   {obs[:,0].min():.4f} to {obs[:,0].max():.4f} kpc")
-    print(f"  Y range:   {obs[:,1].min():.4f} to {obs[:,1].max():.4f} kpc")
-    print(f"  V_Z range: {obs[:,2].min():.4f} to {obs[:,2].max():.4f} km/s")
 
     dataset = (tf.data.Dataset
                .from_tensor_slices(obs_norm)
@@ -269,7 +246,6 @@ for input_filename in DATA_FILES:
                .batch(256)
                .prefetch(1))
 
-    # ── Build & train one model per file ─────────────────────────────────────
     model     = NFlow(n_layers=12, hidden=256)
     optimizer = keras.optimizers.Adam(learning_rate=1e-3, clipnorm=1.0)
 
@@ -309,31 +285,28 @@ for input_filename in DATA_FILES:
 
     print("  Training done.")
 
-    # Force full build with real data, then save via Checkpoint
     _ = model.log_prob(tf.constant(obs_norm[:10]))
     weights_path = f'{base_name}.weights'
     ckpt = tf.train.Checkpoint(model=model)
     ckpt.write(weights_path)
     print(f"  Weights saved → {weights_path}")
 
-    # ── Sample & compute profiles ─────────────────────────────────────────────
     print("  Sampling 100,000 points...")
     samples_norm = model.sample(100_000)
     r_grid, n_r, sigma_r2_b0, sigma_r2_bm5, M_r_b0 = compute_profiles(
         samples_norm, mean_obs, std_obs)
 
-    # ── Print table ───────────────────────────────────────────────────────────
-    print(f"\n  {'r [kpc]':>10} | {'n(r) [kpc-3]':>14} | "
-          f"{'sigma_r2 b=0':>14} | {'Mass b=0 [M_sun]':>18}")
-    print("  " + "-"*63)
-    for i in range(len(r_grid)):
-        print(f"  {r_grid[i]:>10.4f} | {n_r[i]:>14.4e} | "
-              f"{sigma_r2_b0[i]:>14.4f} | {M_r_b0[i]:>18.4e}")
+    # Save profiles for DM script
+    np.savez(f'{base_name}_profiles.npz',
+             r_grid=r_grid, n_r=n_r,
+             sigma_r2_b0=sigma_r2_b0, sigma_r2_bm5=sigma_r2_bm5,
+             M_r_b0=M_r_b0,
+             mean_obs=mean_obs, std_obs=std_obs)
+    print(f"  Profiles saved → {base_name}_profiles.npz")
 
-    # ── Load ground truth & plot ──────────────────────────────────────────────
     gt = load_ground_truth(input_filename)
-    make_plot(base_name, r_grid, n_r, sigma_r2_b0, sigma_r2_bm5, M_r_b0, gt)
+    make_plot(base_name, r_grid, n_r, sigma_r2_b0, sigma_r2_bm5, gt)  # 2 panels
 
 print(f"\n{'='*60}")
-print("All done! One PNG saved per data file.")
+print("All done! Two-panel PNG saved per data file.")
 print(f"{'='*60}")
